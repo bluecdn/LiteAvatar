@@ -1,0 +1,15 @@
+# 构建产物
+/bin/
+avatar-proxy
+gravatar-proxy
+*.linux-amd64
+*.exe
+
+# 运行时计数数据
+static/stats/*.count
+static/stats/*.count.tmp
+
+# 系统/编辑器
+.DS_Store
+._*
+*.swp

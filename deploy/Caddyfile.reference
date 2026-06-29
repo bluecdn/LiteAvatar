@@ -1,0 +1,69 @@
+{
+	email 403010@qq.com
+}
+
+# =============================================================================
+# gravatar.yite.net — 多源头像聚合服务（Go程序，3源failover）
+# 程序: /opt/gravatar-proxy/gravatar-proxy (127.0.0.1:8787)
+# 多源: cn.cravatar.com → secure.gravatar.com → weavatar.com
+# 搬迁自 43.161.202.90 (新加坡)
+# =============================================================================
+
+gravatar.yite.net {
+	tls /etc/caddy/certs/yite.net/fullchain.pem /etc/caddy/certs/yite.net/privkey.pem
+	root * /www/sites/gravatar.bluecdn.com
+	encode gzip zstd
+
+	# 安全头
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# CORS
+	header {
+		Access-Control-Allow-Origin "*"
+		Access-Control-Allow-Methods "GET, OPTIONS, HEAD"
+		Access-Control-Allow-Headers "*"
+	}
+	@options method OPTIONS
+	respond @options 204
+
+	# 只允许 /avatar/<hash> 路径走反代程序（防滥用）
+	@avatar path_regexp avatar ^/avatar/([A-Fa-f0-9]{32,64}|\d{5,12})$
+	handle @avatar {
+		reverse_proxy 127.0.0.1:8787 {
+			header_up X-Real-IP {remote_host}
+			header_down -Access-Control-Allow-Origin
+		}
+	}
+
+	# 统计接口（不缓存）
+	handle /stats.php {
+		header Cache-Control "no-store"
+		reverse_proxy 127.0.0.1:8787 {
+			header_down -Access-Control-Allow-Origin
+			header_down -Cache-Control
+		}
+	}
+
+	# 屏蔽残留的 PHP / macOS AppleDouble 文件
+	@legacy_php path_regexp legacy_php \.php(\..*)?$
+	respond @legacy_php 404
+
+	@appledouble path /._* /stats/._*
+	respond @appledouble 404
+
+	@stats_private path /stats/*
+	respond @stats_private 403
+
+	# 首页（静态介绍页）
+	handle / {
+		header Cache-Control "public, max-age=300, must-revalidate"
+		file_server
+	}
+
+	# 其余静态资源（favicon、图标等）
+	file_server
+}
