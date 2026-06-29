@@ -1,3 +1,3 @@
-module github.com/gentpan/avatar-proxy
+module github.com/gentpan/LiteAvatar
 
 go 1.26

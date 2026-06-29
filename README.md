@@ -1,4 +1,4 @@
-# avatar-proxy
+# LiteAvatar
 
 多源头像聚合代理 —— Gravatar 国内加速。
 

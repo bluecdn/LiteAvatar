@@ -1,4 +1,4 @@
-// avatar-proxy —— 多源头像聚合代理
+// LiteAvatar —— 多源头像聚合代理
 //
 // 并发探测 Cravatar / Gravatar / WeAvatar 三大邮箱头像源，纯数字 ID 走腾讯 QQ 头像，
 // 自动返回第一个命中的真实头像；全部未命中时回退本地默认头像。
@@ -32,7 +32,7 @@ import (
 
 const (
 	defaultListen = "127.0.0.1:8787"
-	userAgent     = "avatar-proxy/1.0 (+https://gravatar.bluecdn.com)"
+	userAgent     = "LiteAvatar/1.0 (+https://gravatar.bluecdn.com)"
 	cacheMaxAge   = 15 * 24 * 60 * 60 // 15 天，与边缘 CDN 缓存保持一致
 	maxSize       = 2048
 	defaultSize   = 80
