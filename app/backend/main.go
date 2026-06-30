@@ -30,6 +30,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -88,6 +89,11 @@ var (
 )
 
 var errNoSource = errors.New("no source hit")
+
+var placeholderSHA1 = map[string]bool{
+	// cnavatar ignores d=404 for unknown hashes and returns this blue placeholder.
+	"11b5d4438537a87a119d46ebbee6b303e678775b": true,
+}
 
 func main() {
 	listen := flag.String("listen", defaultListen, "监听地址")
@@ -165,7 +171,7 @@ func avatarHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	case emailHashRe.MatchString(id):
 		serveAvatar(w, r, fmt.Sprintf("email:%s:%d", id, size), func(ctx context.Context) ([]byte, string, string, error) {
-			return fetchGravatar(ctx, id, size)
+			return fetchGravatar(ctx, id, size, defaultMode(r.URL.Query().Get("d")))
 		})
 	default:
 		writeDefault(w)
@@ -177,15 +183,17 @@ func serveAvatar(w http.ResponseWriter, r *http.Request, key string, fetch func(
 	avifPath, origPath, ctPath := cachePaths(key)
 
 	// 缓存命中且未过期
-	if info, err := os.Stat(avifPath); err == nil && time.Since(info.ModTime()) < cacheTTL {
-		if avifData, err := os.ReadFile(avifPath); err == nil {
-			if acceptsAVIF(r) {
-				output(w, avifData, "image/avif", "cache", "HIT")
-				return
-			}
-			if orig, err := os.ReadFile(origPath); err == nil {
-				output(w, orig, readCT(ctPath), "cache", "HIT")
-				return
+	if !wantsRefresh(r) {
+		if info, err := os.Stat(avifPath); err == nil && time.Since(info.ModTime()) < cacheTTL {
+			if avifData, err := os.ReadFile(avifPath); err == nil {
+				if acceptsAVIF(r) {
+					output(w, avifData, "image/avif", "cache", "HIT")
+					return
+				}
+				if orig, err := os.ReadFile(origPath); err == nil {
+					output(w, orig, readCT(ctPath), "cache", "HIT")
+					return
+				}
 			}
 		}
 	}
@@ -213,18 +221,27 @@ func serveAvatar(w http.ResponseWriter, r *http.Request, key string, fetch func(
 }
 
 // fetchGravatar 严格按 emailSources 顺序串行回源，第一个有真实头像(d=404 下返回图片)的即采用。
-func fetchGravatar(ctx context.Context, hash string, size int) ([]byte, string, string, error) {
+// 某些兼容源会在 d=404 时仍返回占位图；这些已知占位图会被跳过，最后才用官方 Gravatar 默认图兜底。
+func fetchGravatar(ctx context.Context, hash string, size int, d string) ([]byte, string, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, totalTimeout)
 	defer cancel()
 	for _, s := range emailSources {
 		url := fmt.Sprintf("%s/avatar/%s?s=%d&d=404", s.base, hash, size)
 		body, ct, err := httpGet(ctx, url)
 		if err == nil && len(body) > 0 {
+			if isKnownPlaceholder(body) {
+				continue
+			}
 			return body, ct, s.name, nil // 命中真实头像
 		}
 		if ctx.Err() != nil {
 			break
 		}
+	}
+
+	body, ct, err := httpGet(ctx, fmt.Sprintf("%s/avatar/%s?s=%d&d=%s", emailSources[0].base, hash, size, url.QueryEscape(d)))
+	if err == nil && len(body) > 0 {
+		return body, ct, "gravatar-default", nil
 	}
 	return nil, "", "", errNoSource
 }
@@ -281,6 +298,24 @@ func acceptsAVIF(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "image/avif")
 }
 
+func wantsRefresh(r *http.Request) bool {
+	v := strings.ToLower(r.URL.Query().Get("refresh"))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+func defaultMode(d string) string {
+	d = strings.TrimSpace(d)
+	if d == "" || strings.EqualFold(d, "404") {
+		return "mp"
+	}
+	return d
+}
+
+func isKnownPlaceholder(body []byte) bool {
+	sum := sha1.Sum(body)
+	return placeholderSHA1[hex.EncodeToString(sum[:])]
+}
+
 // output 输出图片，带缓存头、来源标记、缓存命中标记，并声明 Vary: Accept 供 CDN 分缓存。
 func output(w http.ResponseWriter, body []byte, contentType, source, cache string) {
 	w.Header().Set("Content-Type", contentType)
@@ -289,6 +324,7 @@ func output(w http.ResponseWriter, body []byte, contentType, source, cache strin
 	w.Header().Set("Vary", "Accept")
 	w.Header().Set("X-Avatar-Source", source)
 	w.Header().Set("X-Cache", cache)
+	w.Header().Set("X-Cache-Status", cache)
 	w.Write(body)
 }
 
