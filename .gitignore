@@ -13,3 +13,6 @@ static/stats/*.count.tmp
 .DS_Store
 ._*
 *.swp
+
+# AVIF 运行时缓存
+/cache/
