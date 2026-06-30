@@ -8,8 +8,8 @@ Type=simple
 User=caddy
 Group=caddy
 WorkingDirectory=/opt/gravatar-proxy
-# Bunny CDN 累计请求数由后台脚本 bunny-stats.sh 每小时写入 bunny.count，go 只读该文件
-ExecStart=/opt/gravatar-proxy/gravatar-proxy -listen 127.0.0.1:8787 -counter /opt/gravatar-proxy/requests.count -gravatar-upstream https://secure.gravatar.com -cache-dir /opt/gravatar-proxy/cache -cache-ttl 168h -bunny-counter /opt/gravatar-proxy/bunny.count
+# CDN 累计请求数由后台脚本每小时写入 *.count，go 只读文件并合并本地请求数
+ExecStart=/opt/gravatar-proxy/gravatar-proxy -listen 127.0.0.1:8787 -counter /opt/gravatar-proxy/requests.count -gravatar-upstream https://secure.gravatar.com -cache-dir /opt/gravatar-proxy/cache -cache-ttl 168h -bunny-counter /opt/gravatar-proxy/bunny.count -baidu-counter /opt/gravatar-proxy/baidu.count
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65535

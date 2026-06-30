@@ -18,7 +18,7 @@ GET /avatar/{id}?s={size}&d={default}
 | `s`  | 尺寸(像素),默认 `80`,上限 `2048` |
 | `d`  | 未命中时透传给上游的默认图策略(gravatar 兼容: `404` / `mp` / `identicon` …) |
 
-其它端点: `GET /stats.php`(累计请求数 JSON) · `GET /healthz`(健康检查)。
+其它端点: `GET /stats` / `GET /stats.php`(累计请求数 JSON) · `GET /healthz`(健康检查)。统计值会合并本地服务请求数、Bunny CDN 请求数与百度 CDN `gravatar.bluecdn.com` 请求数。
 
 响应头 `X-Avatar-Source` 标记实际命中的源(`cravatar` / `gravatar` / `weavatar` / `qq` / `default`)。
 

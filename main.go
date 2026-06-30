@@ -90,6 +90,7 @@ var (
 	avifQuality  int
 	cacheTTL     time.Duration // 缓存有效期：命中且未过期直接返回，过期则重新回源
 	bunnyFile    string        // Bunny CDN 累计请求数文件（由后台脚本定时写入）
+	baiduFile    string        // 百度 CDN 累计请求数文件（由后台脚本定时写入）
 )
 
 var errNoSource = errors.New("no source hit")
@@ -102,12 +103,14 @@ func main() {
 	q := flag.Int("avif-quality", 55, "AVIF 质量 0-100")
 	ttl := flag.Duration("cache-ttl", 7*24*time.Hour, "缓存有效期(过期重新回源),如 168h / 720h")
 	bf := flag.String("bunny-counter", "bunny.count", "Bunny CDN 累计请求数文件(由后台脚本 bunny-stats.sh 定时写入)")
+	bdf := flag.String("baidu-counter", "baidu.count", "百度 CDN 累计请求数文件(由后台脚本 baidu-stats.sh 定时写入)")
 	flag.Parse()
 	counterFile = *cf
 	cacheDir = *cd
 	avifQuality = *q
 	cacheTTL = *ttl
 	bunnyFile = *bf
+	baiduFile = *bdf
 
 	emailSources = []source{
 		{"gravatar", strings.TrimRight(*upstream, "/")},
@@ -371,24 +374,25 @@ func parseSize(s string) int {
 	return n
 }
 
-// statsHandler 返回页脚统计：requests = 本地回源累计 + Bunny CDN 累计服务量(总和)。
-// 详细字段 local/bunny 也一并返回，便于排查；前端只显示 requests。
+// statsHandler 返回页脚统计：requests = 本地回源累计 + Bunny CDN 累计服务量 + 百度 CDN 累计服务量。
+// 详细字段 local/bunny/baidu 也一并返回，便于排查；前端只显示 requests。
 func statsHandler(w http.ResponseWriter, _ *http.Request) {
 	local := atomic.LoadInt64(&requestCount)
-	bunny := fetchBunnyRequests()
+	bunny := readCounterFile(bunnyFile)
+	baidu := readCounterFile(baiduFile)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprintf(w, `{"requests":%d,"local":%d,"bunny":%d}`, local+bunny, local, bunny)
+	fmt.Fprintf(w, `{"requests":%d,"local":%d,"bunny":%d,"baidu":%d}`, local+bunny+baidu, local, bunny, baidu)
 }
 
-// fetchBunnyRequests 读取后台脚本(bunny-stats.sh)定时写入的 Bunny CDN 累计请求数文件。
-// go 自身不调 Bunny API —— 由 systemd timer 每小时跑脚本拉取并落盘，规避 API 配额/限流，
+// readCounterFile 读取后台脚本定时写入的 CDN 累计请求数文件。
+// go 自身不调 CDN API —— 由 systemd timer 每小时跑脚本拉取并落盘，规避 API 配额/限流，
 // 且不受访问流量影响。文件不存在或读取失败返回 0。
-func fetchBunnyRequests() int64 {
-	if bunnyFile == "" {
+func readCounterFile(path string) int64 {
+	if path == "" {
 		return 0
 	}
-	b, err := os.ReadFile(bunnyFile)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
