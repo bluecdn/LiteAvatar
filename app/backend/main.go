@@ -430,9 +430,12 @@ func readSiteFile(name string) []byte {
 }
 
 func trySiteFile(name string) ([]byte, bool) {
-	// 防目录穿越：只取 basename
-	name = filepath.Base(name)
-	b, err := os.ReadFile(filepath.Join(siteDir, "public", name))
+	clean := filepath.Clean("/" + name)
+	clean = strings.TrimPrefix(clean, "/")
+	if clean == "." || strings.HasPrefix(clean, "../") {
+		return nil, false
+	}
+	b, err := os.ReadFile(filepath.Join(siteDir, "public", clean))
 	if err != nil {
 		return nil, false
 	}
@@ -452,6 +455,10 @@ func contentTypeFor(name string) string {
 		return "image/svg+xml"
 	case ".json", ".webmanifest":
 		return "application/json; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js":
+		return "application/javascript; charset=utf-8"
 	case ".txt":
 		return "text/plain; charset=utf-8"
 	default:
