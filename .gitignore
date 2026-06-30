@@ -6,8 +6,8 @@ gravatar-proxy
 *.exe
 
 # 运行时计数数据
-static/stats/*.count
-static/stats/*.count.tmp
+stats/*.count
+stats/*.count.tmp
 
 # 系统/编辑器
 .DS_Store

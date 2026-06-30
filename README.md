@@ -49,12 +49,22 @@ GET /avatar/{id}?s={size}&d={default}
 
 ```bash
 make build && ./gravatar-proxy        # 本地，监听 127.0.0.1:8787
-make run                              # go run
+make run                              # go run ./app/backend
 make linux                            # 交叉编译 Linux amd64 → bin/
 make deploy HOST=root@43.173.85.48    # 编译并部署到服务器
 ```
 
-参数: `-listen`(默认 `127.0.0.1:8787`) · `-counter`(计数持久化文件)。
+参数: `-listen`(默认 `127.0.0.1:8787`) · `-site-dir`(默认当前目录，读取根目录 `index.html` 与 `public/`) · `-counter`(计数持久化文件)。
+
+## 项目结构
+
+```
+index.html          # 首页
+public/             # favicon、manifest 等前端静态资源
+app/backend/        # Go 头像代理后端
+stats/              # CDN 统计脚本与运行时 *.count 计数文件
+deploy/             # systemd / Caddy 部署配置
+```
 
 ## 部署架构
 

@@ -8,7 +8,7 @@
 //   - id 为 32-64 位十六进制 → 邮箱头像 (md5 / sha256)，串行四源
 //   - id 为 5-12 位纯数字   → 腾讯 QQ 头像
 //   - GET /stats(统计页+JSON) / /healthz
-//   - GET /                → 首页(统计页，go:embed 自带，不依赖 Caddy)
+//   - GET /                → 首页(从 -site-dir 读取 index.html 与 public 资源)
 //
 // gravatar 上游可配置(-gravatar-upstream)：硅谷直连 secure.gravatar.com，
 // 上海等被墙节点改走硅谷的 gravatar-us.bluecdn.com 中转。
@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
-	"embed"
 	_ "embed"
 	"encoding/hex"
 	"errors"
@@ -67,12 +66,6 @@ var (
 //go:embed static/default-avatar.png
 var defaultAvatar []byte
 
-// 前端页面与站点静态资源(favicon/manifest 等)，打进二进制由 go 自己服务，
-// 不依赖 Caddy file_server —— 部署只需上传 binary。
-//
-//go:embed all:static/site
-var siteFS embed.FS
-
 var httpClient = &http.Client{
 	Timeout: fetchTimeout,
 	CheckRedirect: func(_ *http.Request, via []*http.Request) error {
@@ -91,22 +84,25 @@ var (
 	cacheTTL     time.Duration // 缓存有效期：命中且未过期直接返回，过期则重新回源
 	bunnyFile    string        // Bunny CDN 累计请求数文件（由后台脚本定时写入）
 	baiduFile    string        // 百度 CDN 累计请求数文件（由后台脚本定时写入）
+	siteDir      string        // 首页与 public 静态资源目录
 )
 
 var errNoSource = errors.New("no source hit")
 
 func main() {
 	listen := flag.String("listen", defaultListen, "监听地址")
-	cf := flag.String("counter", "static/stats/requests.count", "请求计数持久化文件")
+	cf := flag.String("counter", "stats/requests.count", "请求计数持久化文件")
 	upstream := flag.String("gravatar-upstream", "https://secure.gravatar.com", "gravatar 源(被墙节点设为硅谷中转 https://gravatar-us.bluecdn.com)")
 	cd := flag.String("cache-dir", "cache", "AVIF 缓存目录")
+	sd := flag.String("site-dir", ".", "站点根目录(index.html 与 public/)")
 	q := flag.Int("avif-quality", 55, "AVIF 质量 0-100")
 	ttl := flag.Duration("cache-ttl", 7*24*time.Hour, "缓存有效期(过期重新回源),如 168h / 720h")
-	bf := flag.String("bunny-counter", "bunny.count", "Bunny CDN 累计请求数文件(由后台脚本 bunny-stats.sh 定时写入)")
-	bdf := flag.String("baidu-counter", "baidu.count", "百度 CDN 累计请求数文件(由后台脚本 baidu-stats.sh 定时写入)")
+	bf := flag.String("bunny-counter", "stats/bunny.count", "Bunny CDN 累计请求数文件(由后台脚本 stats/bunny-stats.sh 定时写入)")
+	bdf := flag.String("baidu-counter", "stats/baidu.count", "百度 CDN 累计请求数文件(由后台脚本 stats/baidu-stats.py 定时写入)")
 	flag.Parse()
 	counterFile = *cf
 	cacheDir = *cd
+	siteDir = *sd
 	avifQuality = *q
 	cacheTTL = *ttl
 	bunnyFile = *bf
@@ -403,7 +399,7 @@ func readCounterFile(path string) int64 {
 	return n
 }
 
-// siteHandler 服务首页与站点静态资源(favicon/manifest 等)，全部来自 embed.FS，不读磁盘。
+// siteHandler 服务首页与站点静态资源(favicon/manifest 等)，从 -site-dir 读取。
 func siteHandler(w http.ResponseWriter, r *http.Request) {
 	// 根路径返回首页
 	clean := strings.TrimPrefix(r.URL.Path, "/")
@@ -413,7 +409,7 @@ func siteHandler(w http.ResponseWriter, r *http.Request) {
 		w.Write(readSiteFile("index.html"))
 		return
 	}
-	// 其余按文件名从 static/site 取（favicon.ico、site.webmanifest 等）
+	// 其余按文件名从 public/ 取（favicon.ico、site.webmanifest 等）
 	data, ok := trySiteFile(clean)
 	if !ok {
 		http.NotFound(w, r)
@@ -424,9 +420,9 @@ func siteHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// readSiteFile 从 embed FS 读取 static/site 下的文件，返回字节；找不到返回 nil。
+// readSiteFile 从站点根目录读取文件，返回字节；找不到返回 nil。
 func readSiteFile(name string) []byte {
-	b, err := siteFS.ReadFile("static/site/" + name)
+	b, err := os.ReadFile(filepath.Join(siteDir, filepath.Base(name)))
 	if err != nil {
 		return nil
 	}
@@ -436,7 +432,7 @@ func readSiteFile(name string) []byte {
 func trySiteFile(name string) ([]byte, bool) {
 	// 防目录穿越：只取 basename
 	name = filepath.Base(name)
-	b, err := siteFS.ReadFile("static/site/" + name)
+	b, err := os.ReadFile(filepath.Join(siteDir, "public", name))
 	if err != nil {
 		return nil, false
 	}
@@ -476,6 +472,7 @@ func loadCounter() {
 func persistCounter() {
 	n := atomic.LoadInt64(&requestCount)
 	tmp := counterFile + ".tmp"
+	os.MkdirAll(filepath.Dir(counterFile), 0o755)
 	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(n, 10)), 0o644); err == nil {
 		os.Rename(tmp, counterFile)
 	}

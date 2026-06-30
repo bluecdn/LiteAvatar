@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bunny-stats.sh —— 定时拉取 Bunny CDN 累计请求数，写入 bunny.count 供 go 的 /stats 读取。
+# bunny-stats.sh —— 定时拉取 Bunny CDN 累计请求数，写入 stats/bunny.count 供 go 的 /stats 读取。
 #
 # 架构：systemd timer 每小时跑本脚本 → 调 Bunny statistics API → 写纯数字文件。
 # go 不再自己调 API（避免请求量大时触发 API 限流），只读 bunny.count。
@@ -9,12 +9,12 @@
 #   BUNNY_PULLZONE_ID   gravatar 的 Pull Zone ID（如 6086222）
 #   BUNNY_ZONE_START    Pull Zone 创建日（YYYY-MM-DD，用于拉累计总量）
 #
-# 部署位置：/opt/gravatar-proxy/bunny-stats.sh（属 caddy，700：含只读用的 key）
+# 部署位置：/opt/gravatar-proxy/stats/bunny-stats.sh（属 caddy，700：含只读用的 key）
 
 set -euo pipefail
 
 ENV_FILE="${BUNNY_ENV_FILE:-/opt/gravatar-proxy/.env}"
-OUT_FILE="${BUNNY_COUNT_FILE:-/opt/gravatar-proxy/bunny.count}"
+OUT_FILE="${BUNNY_COUNT_FILE:-/opt/gravatar-proxy/stats/bunny.count}"
 LOG_TAG="bunny-stats"
 
 # 加载凭证（.env 是 KEY=VALUE 格式）

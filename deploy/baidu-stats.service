@@ -9,4 +9,4 @@ User=caddy
 Group=caddy
 # 凭证与统计参数从 .env 加载（BAIDU_AK/BAIDU_SK/BAIDU_STAT_*）
 EnvironmentFile=/opt/gravatar-proxy/.env
-ExecStart=/opt/gravatar-proxy/baidu-stats.py
+ExecStart=/opt/gravatar-proxy/stats/baidu-stats.py

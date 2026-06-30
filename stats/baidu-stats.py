@@ -8,7 +8,7 @@
   BAIDU_STAT_DOMAIN=gravatar.bluecdn.com
   BAIDU_STAT_START=2026-06-07
   BAIDU_STAT_METRIC=pv
-  BAIDU_COUNT_FILE=/opt/gravatar-proxy/baidu.count
+  BAIDU_COUNT_FILE=/opt/gravatar-proxy/stats/baidu.count
 """
 import datetime as dt
 import hashlib
@@ -131,7 +131,7 @@ def main():
     start = os.environ.get("BAIDU_STAT_START", "2026-06-07")
     end = os.environ.get("BAIDU_STAT_END") or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
     metric = os.environ.get("BAIDU_STAT_METRIC", "pv")
-    out_file = os.environ.get("BAIDU_COUNT_FILE", "/opt/gravatar-proxy/baidu.count")
+    out_file = os.environ.get("BAIDU_COUNT_FILE", "/opt/gravatar-proxy/stats/baidu.count")
 
     method = os.environ.get("BAIDU_STAT_METHOD", "POST")
     path = os.environ.get("BAIDU_STAT_PATH", "/v2/stat/query")

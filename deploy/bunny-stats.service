@@ -9,4 +9,4 @@ User=caddy
 Group=caddy
 # 凭证从 .env 加载（BUNNY_API_KEY/PULLZONE_ID/ZONE_START）
 EnvironmentFile=/opt/gravatar-proxy/.env
-ExecStart=/opt/gravatar-proxy/bunny-stats.sh
+ExecStart=/opt/gravatar-proxy/stats/bunny-stats.sh
