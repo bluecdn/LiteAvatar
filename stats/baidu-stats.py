@@ -133,15 +133,21 @@ def main():
     metric = os.environ.get("BAIDU_STAT_METRIC", "pv")
     out_file = os.environ.get("BAIDU_COUNT_FILE", "/opt/gravatar-proxy/stats/baidu.count")
 
-    method = os.environ.get("BAIDU_STAT_METHOD", "POST")
-    path = os.environ.get("BAIDU_STAT_PATH", "/v2/stat/query")
-    params = json.loads(os.environ.get("BAIDU_STAT_PARAMS", "{}"))
-    body = json.loads(os.environ.get("BAIDU_STAT_BODY", json.dumps({
-        "domains": [domain],
-        "metrics": [metric],
+    if len(start) == 10:
+        start = start + "T00:00:00Z"
+    if len(end) == 10:
+        end = end + "T23:59:59Z"
+
+    method = os.environ.get("BAIDU_STAT_METHOD", "GET")
+    path = os.environ.get("BAIDU_STAT_PATH", f"/v2/stat/{metric}")
+    params = json.loads(os.environ.get("BAIDU_STAT_PARAMS", json.dumps({
+        "domain": domain,
         "startTime": start,
         "endTime": end,
+        "period": "86400",
     })))
+    body_env = os.environ.get("BAIDU_STAT_BODY")
+    body = json.loads(body_env) if body_env else None
 
     try:
         resp = fetch_json(method, path, params, body, ak, sk)
