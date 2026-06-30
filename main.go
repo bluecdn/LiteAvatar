@@ -21,7 +21,6 @@ import (
 	"embed"
 	_ "embed"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,7 +36,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -91,24 +89,8 @@ var (
 	cacheDir     string
 	avifQuality  int
 	cacheTTL     time.Duration // 缓存有效期：命中且未过期直接返回，过期则重新回源
+	bunnyFile    string        // Bunny CDN 累计请求数文件（由后台脚本定时写入）
 )
-
-// CDN 统计配置：从环境变量读取，服务器侧用 systemd EnvironmentFile 加载，绝不硬编码进二进制。
-// gravatar.bluecdn.com 只走 Bunny CDN（已确认不走百度），故只集成 Bunny。
-var (
-	bunnyAPIKey     string // BUNNY_API_KEY
-	bunnyPullZoneID string // BUNNY_PULLZONE_ID（gravatar = 6086222）
-	bunnyZoneStart  string // BUNNY_ZONE_START（pull zone 创建日，用于拉累计总量，如 2026-06-07）
-)
-
-// CDN 请求数缓存：避免频繁打外部 API（有配额/限流），缓存 5 分钟。
-var (
-	bunnyStatsCache int64
-	bunnyCacheAt    time.Time
-	bunnyCacheMu    sync.Mutex
-)
-
-const bunnyCacheTTL = 5 * time.Minute
 
 var errNoSource = errors.New("no source hit")
 
@@ -119,19 +101,13 @@ func main() {
 	cd := flag.String("cache-dir", "cache", "AVIF 缓存目录")
 	q := flag.Int("avif-quality", 55, "AVIF 质量 0-100")
 	ttl := flag.Duration("cache-ttl", 7*24*time.Hour, "缓存有效期(过期重新回源),如 168h / 720h")
+	bf := flag.String("bunny-counter", "bunny.count", "Bunny CDN 累计请求数文件(由后台脚本 bunny-stats.sh 定时写入)")
 	flag.Parse()
 	counterFile = *cf
 	cacheDir = *cd
 	avifQuality = *q
 	cacheTTL = *ttl
-
-	// CDN 统计凭证从环境变量加载（systemd EnvironmentFile=/opt/gravatar-proxy/.env）。
-	bunnyAPIKey = os.Getenv("BUNNY_API_KEY")
-	bunnyPullZoneID = os.Getenv("BUNNY_PULLZONE_ID")
-	bunnyZoneStart = os.Getenv("BUNNY_ZONE_START")
-	if bunnyAPIKey == "" || bunnyPullZoneID == "" {
-		log.Printf("warn: BUNNY_API_KEY/BUNNY_PULLZONE_ID 未配置，/stats 将只显示本地回源计数")
-	}
+	bunnyFile = *bf
 
 	emailSources = []source{
 		{"gravatar", strings.TrimRight(*upstream, "/")},
@@ -405,55 +381,22 @@ func statsHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, `{"requests":%d,"local":%d,"bunny":%d}`, local+bunny, local, bunny)
 }
 
-// fetchBunnyRequests 调 Bunny statistics API 取该 pull zone 累计服务请求数，
-// 结果缓存 5 分钟(bunnyCacheTTL)以规避 API 配额/限流；凭证未配置或调用失败返回 0。
+// fetchBunnyRequests 读取后台脚本(bunny-stats.sh)定时写入的 Bunny CDN 累计请求数文件。
+// go 自身不调 Bunny API —— 由 systemd timer 每小时跑脚本拉取并落盘，规避 API 配额/限流，
+// 且不受访问流量影响。文件不存在或读取失败返回 0。
 func fetchBunnyRequests() int64 {
-	if bunnyAPIKey == "" || bunnyPullZoneID == "" {
+	if bunnyFile == "" {
 		return 0
 	}
-	bunnyCacheMu.Lock()
-	if !bunnyCacheAt.IsZero() && time.Since(bunnyCacheAt) < bunnyCacheTTL {
-		v := bunnyStatsCache
-		bunnyCacheMu.Unlock()
-		return v
-	}
-	bunnyCacheMu.Unlock()
-
-	// 拉取 pull zone 创建日到今天的累计请求数。
-	start := bunnyZoneStart
-	if start == "" {
-		start = "2026-06-07" // 兜底：gravatar pull zone 的创建日
-	}
-	end := time.Now().UTC().Format("2006-01-02")
-	url := fmt.Sprintf("https://api.bunny.net/statistics?pullZone=%s&dateFrom=%s&dateTo=%s&serverZoneId=-1", bunnyPullZoneID, start, end)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	b, err := os.ReadFile(bunnyFile)
 	if err != nil {
-		return atomic.LoadInt64(&bunnyStatsCache)
+		return 0
 	}
-	req.Header.Set("AccessKey", bunnyAPIKey)
-	resp, err := httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return atomic.LoadInt64(&bunnyStatsCache) // 失败时返回上次缓存值（可能为 0）
+	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0
 	}
-	defer resp.Body.Close()
-	var st struct {
-		TotalRequestsServed int64 `json:"TotalRequestsServed"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
-		return atomic.LoadInt64(&bunnyStatsCache)
-	}
-
-	bunnyCacheMu.Lock()
-	bunnyStatsCache = st.TotalRequestsServed
-	bunnyCacheAt = time.Now()
-	bunnyCacheMu.Unlock()
-	return st.TotalRequestsServed
+	return n
 }
 
 // siteHandler 服务首页与站点静态资源(favicon/manifest 等)，全部来自 embed.FS，不读磁盘。

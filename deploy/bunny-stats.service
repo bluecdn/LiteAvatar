@@ -1,0 +1,12 @@
+# /etc/systemd/system/bunny-stats.service
+# 由 bunny-stats.timer 每小时触发，拉取 Bunny CDN 累计请求数。
+[Unit]
+Description=LiteAvatar Bunny CDN stats fetcher
+
+[Service]
+Type=oneshot
+User=caddy
+Group=caddy
+# 凭证从 .env 加载（BUNNY_API_KEY/PULLZONE_ID/ZONE_START）
+EnvironmentFile=/opt/gravatar-proxy/.env
+ExecStart=/opt/gravatar-proxy/bunny-stats.sh
