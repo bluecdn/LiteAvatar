@@ -16,3 +16,7 @@ static/stats/*.count.tmp
 
 # AVIF 运行时缓存
 /cache/
+
+# CDN 凭证（只在服务器 /opt/gravatar-proxy/.env，绝不入 git）
+.env
+.env.local

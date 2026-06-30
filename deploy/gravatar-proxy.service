@@ -1,6 +1,6 @@
 # /etc/systemd/system/gravatar-proxy.service
 [Unit]
-Description=Gravatar avatar proxy (Go)
+Description=LiteAvatar multi-source avatar proxy (Go)
 After=network.target
 
 [Service]
@@ -8,7 +8,9 @@ Type=simple
 User=caddy
 Group=caddy
 WorkingDirectory=/opt/gravatar-proxy
-ExecStart=/opt/gravatar-proxy/gravatar-proxy
+# CDN 统计凭证从 env 文件加载（/opt/gravatar-proxy/.env，不入 git）
+EnvironmentFile=/opt/gravatar-proxy/.env
+ExecStart=/opt/gravatar-proxy/gravatar-proxy -listen 127.0.0.1:8787 -counter /opt/gravatar-proxy/requests.count -gravatar-upstream https://secure.gravatar.com -cache-dir /opt/gravatar-proxy/cache -cache-ttl 168h
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65535

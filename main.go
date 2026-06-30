@@ -7,7 +7,8 @@
 // 接口:  GET /avatar/{id}?s={size}
 //   - id 为 32-64 位十六进制 → 邮箱头像 (md5 / sha256)，串行四源
 //   - id 为 5-12 位纯数字   → 腾讯 QQ 头像
-//   - GET /stats.php / /healthz
+//   - GET /stats(统计页+JSON) / /healthz
+//   - GET /                → 首页(统计页，go:embed 自带，不依赖 Caddy)
 //
 // gravatar 上游可配置(-gravatar-upstream)：硅谷直连 secure.gravatar.com，
 // 上海等被墙节点改走硅谷的 gravatar-us.bluecdn.com 中转。
@@ -17,8 +18,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"embed"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,6 +37,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -65,6 +69,12 @@ var (
 //go:embed static/default-avatar.png
 var defaultAvatar []byte
 
+// 前端页面与站点静态资源(favicon/manifest 等)，打进二进制由 go 自己服务，
+// 不依赖 Caddy file_server —— 部署只需上传 binary。
+//
+//go:embed all:static/site
+var siteFS embed.FS
+
 var httpClient = &http.Client{
 	Timeout: fetchTimeout,
 	CheckRedirect: func(_ *http.Request, via []*http.Request) error {
@@ -83,6 +93,23 @@ var (
 	cacheTTL     time.Duration // 缓存有效期：命中且未过期直接返回，过期则重新回源
 )
 
+// CDN 统计配置：从环境变量读取，服务器侧用 systemd EnvironmentFile 加载，绝不硬编码进二进制。
+// gravatar.bluecdn.com 只走 Bunny CDN（已确认不走百度），故只集成 Bunny。
+var (
+	bunnyAPIKey     string // BUNNY_API_KEY
+	bunnyPullZoneID string // BUNNY_PULLZONE_ID（gravatar = 6086222）
+	bunnyZoneStart  string // BUNNY_ZONE_START（pull zone 创建日，用于拉累计总量，如 2026-06-07）
+)
+
+// CDN 请求数缓存：避免频繁打外部 API（有配额/限流），缓存 5 分钟。
+var (
+	bunnyStatsCache int64
+	bunnyCacheAt    time.Time
+	bunnyCacheMu    sync.Mutex
+)
+
+const bunnyCacheTTL = 5 * time.Minute
+
 var errNoSource = errors.New("no source hit")
 
 func main() {
@@ -97,6 +124,14 @@ func main() {
 	cacheDir = *cd
 	avifQuality = *q
 	cacheTTL = *ttl
+
+	// CDN 统计凭证从环境变量加载（systemd EnvironmentFile=/opt/gravatar-proxy/.env）。
+	bunnyAPIKey = os.Getenv("BUNNY_API_KEY")
+	bunnyPullZoneID = os.Getenv("BUNNY_PULLZONE_ID")
+	bunnyZoneStart = os.Getenv("BUNNY_ZONE_START")
+	if bunnyAPIKey == "" || bunnyPullZoneID == "" {
+		log.Printf("warn: BUNNY_API_KEY/BUNNY_PULLZONE_ID 未配置，/stats 将只显示本地回源计数")
+	}
 
 	emailSources = []source{
 		{"gravatar", strings.TrimRight(*upstream, "/")},
@@ -114,10 +149,16 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/avatar/", avatarHandler)
-	mux.HandleFunc("/stats.php", statsHandler)
+	// /stats.php 旧路径保留兼容(重定向到 /stats)，避免旧书签/前端 404。
+	mux.HandleFunc("/stats.php", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/stats", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/stats", statsHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, "ok")
 	})
+	// 站点静态资源(favicon/manifest)与首页由 go 自己服务，兜底 "/" 必须最后注册。
+	mux.HandleFunc("/", siteHandler)
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -354,10 +395,125 @@ func parseSize(s string) int {
 	return n
 }
 
+// statsHandler 返回页脚统计：requests = 本地回源累计 + Bunny CDN 累计服务量(总和)。
+// 详细字段 local/bunny 也一并返回，便于排查；前端只显示 requests。
 func statsHandler(w http.ResponseWriter, _ *http.Request) {
+	local := atomic.LoadInt64(&requestCount)
+	bunny := fetchBunnyRequests()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprintf(w, `{"requests":%d}`, atomic.LoadInt64(&requestCount))
+	fmt.Fprintf(w, `{"requests":%d,"local":%d,"bunny":%d}`, local+bunny, local, bunny)
+}
+
+// fetchBunnyRequests 调 Bunny statistics API 取该 pull zone 累计服务请求数，
+// 结果缓存 5 分钟(bunnyCacheTTL)以规避 API 配额/限流；凭证未配置或调用失败返回 0。
+func fetchBunnyRequests() int64 {
+	if bunnyAPIKey == "" || bunnyPullZoneID == "" {
+		return 0
+	}
+	bunnyCacheMu.Lock()
+	if !bunnyCacheAt.IsZero() && time.Since(bunnyCacheAt) < bunnyCacheTTL {
+		v := bunnyStatsCache
+		bunnyCacheMu.Unlock()
+		return v
+	}
+	bunnyCacheMu.Unlock()
+
+	// 拉取 pull zone 创建日到今天的累计请求数。
+	start := bunnyZoneStart
+	if start == "" {
+		start = "2026-06-07" // 兜底：gravatar pull zone 的创建日
+	}
+	end := time.Now().UTC().Format("2006-01-02")
+	url := fmt.Sprintf("https://api.bunny.net/statistics?pullZone=%s&dateFrom=%s&dateTo=%s&serverZoneId=-1", bunnyPullZoneID, start, end)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return atomic.LoadInt64(&bunnyStatsCache)
+	}
+	req.Header.Set("AccessKey", bunnyAPIKey)
+	resp, err := httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return atomic.LoadInt64(&bunnyStatsCache) // 失败时返回上次缓存值（可能为 0）
+	}
+	defer resp.Body.Close()
+	var st struct {
+		TotalRequestsServed int64 `json:"TotalRequestsServed"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		return atomic.LoadInt64(&bunnyStatsCache)
+	}
+
+	bunnyCacheMu.Lock()
+	bunnyStatsCache = st.TotalRequestsServed
+	bunnyCacheAt = time.Now()
+	bunnyCacheMu.Unlock()
+	return st.TotalRequestsServed
+}
+
+// siteHandler 服务首页与站点静态资源(favicon/manifest 等)，全部来自 embed.FS，不读磁盘。
+func siteHandler(w http.ResponseWriter, r *http.Request) {
+	// 根路径返回首页
+	clean := strings.TrimPrefix(r.URL.Path, "/")
+	if clean == "" || clean == "index.html" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Write(readSiteFile("index.html"))
+		return
+	}
+	// 其余按文件名从 static/site 取（favicon.ico、site.webmanifest 等）
+	data, ok := trySiteFile(clean)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeFor(clean))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(data)
+}
+
+// readSiteFile 从 embed FS 读取 static/site 下的文件，返回字节；找不到返回 nil。
+func readSiteFile(name string) []byte {
+	b, err := siteFS.ReadFile("static/site/" + name)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+func trySiteFile(name string) ([]byte, bool) {
+	// 防目录穿越：只取 basename
+	name = filepath.Base(name)
+	b, err := siteFS.ReadFile("static/site/" + name)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// contentTypeFor 按扩展名返回常见静态资源的 Content-Type。
+func contentTypeFor(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".ico":
+		return "image/x-icon"
+	case ".png":
+		return "image/png"
+	case ".svg":
+		return "image/svg+xml"
+	case ".json", ".webmanifest":
+		return "application/json; charset=utf-8"
+	case ".txt":
+		return "text/plain; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func loadCounter() {

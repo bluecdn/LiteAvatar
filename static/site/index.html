@@ -824,7 +824,7 @@ footer.site-footer i { margin: 0 .25rem; }
 </footer>
 <script>
 (function(){
-    fetch('/stats.php', {cache:'no-store'})
+    fetch('/stats', {cache:'no-store'})
         .then(r => r.json())
         .then(d => {
             var n = d.requests || 0;
