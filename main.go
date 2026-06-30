@@ -1,16 +1,15 @@
 // LiteAvatar —— 多源头像聚合代理
 //
-// 并发探测 Cravatar / Cnavatar / WeAvatar / Gravatar 邮箱头像源，纯数字 ID 走腾讯 QQ 头像，
-// 第一个命中的立即采用；全部未命中回退内置默认头像。命中头像转 AVIF 落盘缓存，
-// 按请求 Accept 头协商返回 AVIF 或原图(webp/jpeg/png)。
+// 邮箱头像按优先级串行回源：gravatar → cravatar → weavatar → cnavatar，
+// 哪个先有真实头像(非默认、非404)就用哪个；纯数字 ID(前端检测到的 QQ 邮箱→QQ号)走腾讯 QQ 头像。
+// 拿到真实头像后转 AVIF 落盘缓存，按 Accept 头协商返回 AVIF 或原图；缓存有效期可配。
 //
-// 接口:  GET /avatar/{id}?s={size}&d={default}
-//   - id 为 32-64 位十六进制 → 邮箱头像 (md5 / sha256)，并发探测各源
+// 接口:  GET /avatar/{id}?s={size}
+//   - id 为 32-64 位十六进制 → 邮箱头像 (md5 / sha256)，串行四源
 //   - id 为 5-12 位纯数字   → 腾讯 QQ 头像
-//   - GET /stats.php        → 累计请求数 (JSON)
-//   - GET /healthz          → 健康检查
+//   - GET /stats.php / /healthz
 //
-// gravatar 上游可配置(-gravatar-upstream)：硅谷节点直连 secure.gravatar.com，
+// gravatar 上游可配置(-gravatar-upstream)：硅谷直连 secure.gravatar.com，
 // 上海等被墙节点改走硅谷的 gravatar-us.bluecdn.com 中转。
 package main
 
@@ -45,20 +44,17 @@ import (
 const (
 	defaultListen = "127.0.0.1:8787"
 	userAgent     = "LiteAvatar/1.0 (+https://gravatar.bluecdn.com)"
-	cacheMaxAge   = 15 * 24 * 60 * 60 // 15 天，与边缘 CDN 缓存一致
 	maxSize       = 2048
 	defaultSize   = 80
-	probeTimeout  = 5 * time.Second
-	fetchTimeout  = 10 * time.Second
+	fetchTimeout  = 8 * time.Second  // 单个源回源超时
+	totalTimeout  = 18 * time.Second // 串行所有源的总超时
 	persistEvery  = 30 * time.Second
-	cacheTTL      = 30 * 24 * time.Hour // 落盘缓存保留期
 )
 
 type source struct{ name, base string }
 
-// 邮箱头像源：并发探测，第一个命中的立即采用。
-// 国内镜像在前、gravatar 兜底——国内节点不会被 gravatar 被墙的超时拖慢。
-// gravatar 的 base 由 -gravatar-upstream 决定（在 main 中注入）。
+// 邮箱头像源，严格按优先级串行：gravatar 第一(最准),依次降级到国内镜像。
+// 哪个先返回真实头像(d=404 下非 404)就用它。gravatar 的 base 由 -gravatar-upstream 注入。
 var emailSources []source
 
 var (
@@ -84,6 +80,7 @@ var (
 	counterFile  string
 	cacheDir     string
 	avifQuality  int
+	cacheTTL     time.Duration // 缓存有效期：命中且未过期直接返回，过期则重新回源
 )
 
 var errNoSource = errors.New("no source hit")
@@ -94,16 +91,18 @@ func main() {
 	upstream := flag.String("gravatar-upstream", "https://secure.gravatar.com", "gravatar 源(被墙节点设为硅谷中转 https://gravatar-us.bluecdn.com)")
 	cd := flag.String("cache-dir", "cache", "AVIF 缓存目录")
 	q := flag.Int("avif-quality", 55, "AVIF 质量 0-100")
+	ttl := flag.Duration("cache-ttl", 7*24*time.Hour, "缓存有效期(过期重新回源),如 168h / 720h")
 	flag.Parse()
 	counterFile = *cf
 	cacheDir = *cd
 	avifQuality = *q
+	cacheTTL = *ttl
 
 	emailSources = []source{
-		{"cravatar", "https://cravatar.com"},
-		{"cnavatar", "https://cnavatar.com"},
-		{"weavatar", "https://weavatar.com"},
 		{"gravatar", strings.TrimRight(*upstream, "/")},
+		{"cravatar", "https://cravatar.com"},
+		{"weavatar", "https://weavatar.com"},
+		{"cnavatar", "https://cnavatar.com"},
 	}
 
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
@@ -125,7 +124,7 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("LiteAvatar listening on %s | gravatar-upstream=%s | cache=%s", *listen, emailSources[3].base, cacheDir)
+	log.Printf("LiteAvatar on %s | gravatar=%s | cache=%s ttl=%s", *listen, emailSources[0].base, cacheDir, cacheTTL)
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
@@ -142,7 +141,6 @@ func avatarHandler(w http.ResponseWriter, r *http.Request) {
 	id = strings.ToLower(strings.TrimSpace(id))
 
 	size := parseSize(r.URL.Query().Get("s"))
-	def := r.URL.Query().Get("d")
 
 	switch {
 	case qqRe.MatchString(id):
@@ -151,32 +149,32 @@ func avatarHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	case emailHashRe.MatchString(id):
 		serveAvatar(w, r, fmt.Sprintf("email:%s:%d", id, size), func(ctx context.Context) ([]byte, string, string, error) {
-			return fetchGravatar(ctx, id, size, def)
+			return fetchGravatar(ctx, id, size)
 		})
 	default:
 		writeDefault(w)
 	}
 }
 
-// serveAvatar 统一处理：缓存命中直接按 Accept 返回；未命中则回源拉取、转 AVIF 落盘、再返回。
+// serveAvatar 缓存命中且未过期则按 Accept 返回；否则回源、转 AVIF 落盘、再返回。
 func serveAvatar(w http.ResponseWriter, r *http.Request, key string, fetch func(context.Context) ([]byte, string, string, error)) {
 	avifPath, origPath, ctPath := cachePaths(key)
 
-	// 缓存命中
-	if avifData, err := os.ReadFile(avifPath); err == nil {
-		if acceptsAVIF(r) {
-			touch(avifPath)
-			output(w, avifData, "image/avif", "cache", "HIT")
-			return
-		}
-		if orig, err := os.ReadFile(origPath); err == nil {
-			touch(origPath)
-			output(w, orig, readCT(ctPath), "cache", "HIT")
-			return
+	// 缓存命中且未过期
+	if info, err := os.Stat(avifPath); err == nil && time.Since(info.ModTime()) < cacheTTL {
+		if avifData, err := os.ReadFile(avifPath); err == nil {
+			if acceptsAVIF(r) {
+				output(w, avifData, "image/avif", "cache", "HIT")
+				return
+			}
+			if orig, err := os.ReadFile(origPath); err == nil {
+				output(w, orig, readCT(ctPath), "cache", "HIT")
+				return
+			}
 		}
 	}
 
-	// 未命中：回源
+	// 未命中/过期：回源
 	body, ct, src, err := fetch(r.Context())
 	if err != nil || len(body) == 0 {
 		writeDefault(w)
@@ -198,15 +196,21 @@ func serveAvatar(w http.ResponseWriter, r *http.Request, key string, fetch func(
 	}
 }
 
-// fetchGravatar 并发探测邮箱源，命中后回源拉取真实头像。
-func fetchGravatar(ctx context.Context, hash string, size int, def string) ([]byte, string, string, error) {
-	src := probeSources(ctx, hash)
-	if src.base == "" {
-		return nil, "", "", errNoSource
+// fetchGravatar 严格按 emailSources 顺序串行回源，第一个有真实头像(d=404 下返回图片)的即采用。
+func fetchGravatar(ctx context.Context, hash string, size int) ([]byte, string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, totalTimeout)
+	defer cancel()
+	for _, s := range emailSources {
+		url := fmt.Sprintf("%s/avatar/%s?s=%d&d=404", s.base, hash, size)
+		body, ct, err := httpGet(ctx, url)
+		if err == nil && len(body) > 0 {
+			return body, ct, s.name, nil // 命中真实头像
+		}
+		if ctx.Err() != nil {
+			break
+		}
 	}
-	url := fmt.Sprintf("%s/avatar/%s?s=%d&d=%s", src.base, hash, size, defaultParam(def))
-	body, ct, err := httpGet(ctx, url)
-	return body, ct, src.name, err
+	return nil, "", "", errNoSource
 }
 
 // fetchQQ 拉取腾讯 QQ 头像。
@@ -216,55 +220,7 @@ func fetchQQ(ctx context.Context, qq string, size int) ([]byte, string, string, 
 	return body, ct, "qq", err
 }
 
-// probeSources 并发探测各邮箱源，第一个命中的立即采用（并取消其余探测）。
-// 探测请求 {base}/avatar/{hash}?s=1&d=404：HTTP 200 即视为存在真实头像。
-func probeSources(ctx context.Context, hash string) source {
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-
-	hits := make(chan int, len(emailSources))
-	for i, s := range emailSources {
-		go func(i int, base string) {
-			idx := -1
-			if probe(ctx, fmt.Sprintf("%s/avatar/%s?s=1&d=404", base, hash)) {
-				idx = i
-			}
-			select {
-			case hits <- idx:
-			case <-ctx.Done():
-			}
-		}(i, s.base)
-	}
-
-	for remaining := len(emailSources); remaining > 0; remaining-- {
-		select {
-		case idx := <-hits:
-			if idx >= 0 {
-				return emailSources[idx]
-			}
-		case <-ctx.Done():
-			return source{}
-		}
-	}
-	return source{}
-}
-
-func probe(ctx context.Context, url string) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("User-Agent", userAgent)
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-	return resp.StatusCode == http.StatusOK
-}
-
-// httpGet 回源拉取图片，返回 body 与 Content-Type。
+// httpGet 回源拉取图片，返回 body 与 Content-Type；非 200(含 404)视为该源无头像。
 func httpGet(ctx context.Context, url string) ([]byte, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
@@ -313,7 +269,7 @@ func acceptsAVIF(r *http.Request) bool {
 func output(w http.ResponseWriter, body []byte, contentType, source, cache string) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", cacheMaxAge))
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(cacheTTL.Seconds())))
 	w.Header().Set("Vary", "Accept")
 	w.Header().Set("X-Avatar-Source", source)
 	w.Header().Set("X-Cache", cache)
@@ -354,14 +310,9 @@ func readCT(path string) string {
 	return "image/jpeg"
 }
 
-func touch(path string) {
-	now := time.Now()
-	os.Chtimes(path, now, now)
-}
-
-// cleanupLoop 定期清理超过 cacheTTL 未访问的缓存文件。
+// cleanupLoop 定期清理超过 cacheTTL 未更新的缓存文件。
 func cleanupLoop() {
-	t := time.NewTicker(12 * time.Hour)
+	t := time.NewTicker(6 * time.Hour)
 	defer t.Stop()
 	for range t.C {
 		cutoff := time.Now().Add(-cacheTTL)
@@ -401,13 +352,6 @@ func parseSize(s string) int {
 		return maxSize
 	}
 	return n
-}
-
-func defaultParam(d string) string {
-	if d == "" {
-		return "404"
-	}
-	return d
 }
 
 func statsHandler(w http.ResponseWriter, _ *http.Request) {
