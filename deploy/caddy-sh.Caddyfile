@@ -1,0 +1,108 @@
+{
+	email 403010@qq.com
+}
+
+bluecdn.com {
+	encode gzip zstd
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+	reverse_proxy 127.0.0.1:8098
+}
+
+status.bluecdn.com {
+	encode gzip zstd
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+	reverse_proxy 127.0.0.1:8097
+}
+
+
+fonts.bluecdn.com {
+	encode gzip zstd
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Access-Control-Allow-Origin "*"
+		Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+		Access-Control-Allow-Headers "*"
+	}
+	@opt method OPTIONS
+	respond @opt 204
+
+	reverse_proxy 127.0.0.1:8098 {
+		header_up Host fonts.bluecdn.com
+	}
+}
+
+
+gstatic.bluecdn.com {
+	encode gzip zstd
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Access-Control-Allow-Origin "*"
+		Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+		Access-Control-Allow-Headers "*"
+	}
+	@opt method OPTIONS
+	respond @opt 204
+
+	reverse_proxy 127.0.0.1:8098 {
+		header_up Host gstatic.bluecdn.com
+	}
+}
+
+# 百度云回源入口 → LiteAvatar(:8787)
+gravatar-origin-sh.bluecdn.com {
+	encode gzip zstd
+	header Access-Control-Allow-Origin "*"
+	reverse_proxy 127.0.0.1:8787
+}
+
+# CDN 回源时 HTTP Host=gravatar.bluecdn.com,需显式站点块匹配(证书用 acme.sh DNS-01 签的)
+gravatar.bluecdn.com {
+	tls /etc/caddy/certs/gravatar.fullchain.pem /etc/caddy/certs/gravatar.key
+	encode gzip zstd
+	header Access-Control-Allow-Origin "*"
+	reverse_proxy 127.0.0.1:8787
+}
+
+www.bluecdn.com {
+	redir https://bluecdn.com{uri} 301
+}
+
+:80 {
+	@site host static.bluecdn.com static-edge.bluecdn.com origin-sh.bluecdn.com
+	handle @site {
+		encode gzip zstd
+		header Access-Control-Allow-Origin "*"
+		header Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+		header Access-Control-Allow-Headers "*"
+		@opt method OPTIONS
+		respond @opt 204
+
+		@proxy path /npm/* /gh/* /wp/* /combine/* /esm/* /ajax/libs/*
+		handle @proxy {
+			reverse_proxy http://47.254.125.87 {
+				header_up Host static.bluecdn.com
+			}
+		}
+
+		handle {
+			root * /www/sites/static.bluecdn.com
+			@imm path *.woff2 *.woff
+			header @imm Cache-Control "public, max-age=31536000, immutable"
+			@short path *.css *.html /
+			header @short Cache-Control "public, max-age=300, must-revalidate"
+			file_server
+		}
+	}
+}
