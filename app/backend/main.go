@@ -25,8 +25,8 @@ import (
 	"fmt"
 	"image"
 	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"net/http"
@@ -36,10 +36,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gen2brain/avif"
+	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 )
 
@@ -51,6 +53,7 @@ const (
 	fetchTimeout  = 8 * time.Second  // 单个源回源超时
 	totalTimeout  = 18 * time.Second // 串行所有源的总超时
 	persistEvery  = 30 * time.Second
+	cacheVersion  = "v2"
 )
 
 type source struct{ name, base string }
@@ -64,8 +67,20 @@ var (
 	qqRe        = regexp.MustCompile(`^\d{5,12}$`)
 )
 
-//go:embed static/default-avatar.png
+//go:embed static/default-avatar.avif
 var defaultAvatar []byte
+
+var (
+	defaultAvatarOnce  sync.Once
+	defaultAvatarImage image.Image
+	defaultAvatarErr   error
+	defaultRenderCache = struct {
+		sync.Mutex
+		entries map[string][]byte
+		order   []string
+	}{entries: make(map[string][]byte)}
+	cnavatarPlaceholderHashes sync.Map
+)
 
 var httpClient = &http.Client{
 	Timeout: fetchTimeout,
@@ -85,15 +100,13 @@ var (
 	cacheTTL     time.Duration // 缓存有效期：命中且未过期直接返回，过期则重新回源
 	bunnyFile    string        // Bunny CDN 累计请求数文件（由后台脚本定时写入）
 	baiduFile    string        // 百度 CDN 累计请求数文件（由后台脚本定时写入）
+	esaFile      string        // 阿里云 ESA 累计请求数文件（由后台脚本定时写入）
 	siteDir      string        // 首页与 public 静态资源目录
 )
 
 var errNoSource = errors.New("no source hit")
 
-var placeholderSHA1 = map[string]bool{
-	// cnavatar ignores d=404 for unknown hashes and returns this blue placeholder.
-	"11b5d4438537a87a119d46ebbee6b303e678775b": true,
-}
+const cnavatarProbeHash = "00000000000000000000000000000000"
 
 func main() {
 	listen := flag.String("listen", defaultListen, "监听地址")
@@ -105,6 +118,7 @@ func main() {
 	ttl := flag.Duration("cache-ttl", 7*24*time.Hour, "缓存有效期(过期重新回源),如 168h / 720h")
 	bf := flag.String("bunny-counter", "stats/bunny.count", "Bunny CDN 累计请求数文件(由后台脚本 stats/bunny-stats.sh 定时写入)")
 	bdf := flag.String("baidu-counter", "stats/baidu.count", "百度 CDN 累计请求数文件(由后台脚本 stats/baidu-stats.py 定时写入)")
+	ef := flag.String("esa-counter", "stats/esa.count", "阿里云 ESA 累计请求数文件")
 	flag.Parse()
 	counterFile = *cf
 	cacheDir = *cd
@@ -113,13 +127,9 @@ func main() {
 	cacheTTL = *ttl
 	bunnyFile = *bf
 	baiduFile = *bdf
+	esaFile = *ef
 
-	emailSources = []source{
-		{"gravatar", strings.TrimRight(*upstream, "/")},
-		{"cravatar", "https://cravatar.com"},
-		{"weavatar", "https://weavatar.com"},
-		{"cnavatar", "https://cnavatar.com"},
-	}
+	emailSources = configuredEmailSources(*upstream)
 
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		log.Printf("warn: 无法创建缓存目录 %s: %v", cacheDir, err)
@@ -136,6 +146,7 @@ func main() {
 	})
 	mux.HandleFunc("/stats", statsHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		io.WriteString(w, "ok")
 	})
 	// 站点静态资源(favicon/manifest)与首页由 go 自己服务，兜底 "/" 必须最后注册。
@@ -152,6 +163,15 @@ func main() {
 	}
 }
 
+func configuredEmailSources(gravatarUpstream string) []source {
+	return []source{
+		{"gravatar", strings.TrimRight(gravatarUpstream, "/")},
+		{"cravatar", "https://cravatar.com"},
+		{"weavatar", "https://weavatar.com"},
+		{"cnavatar", "https://cnavatar.com"},
+	}
+}
+
 // avatarHandler 解析 /avatar/{id} 并按 id 形态分流，统一走缓存+AVIF 协商。
 func avatarHandler(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt64(&requestCount, 1)
@@ -162,24 +182,24 @@ func avatarHandler(w http.ResponseWriter, r *http.Request) {
 	id = strings.TrimSuffix(id, ".avif")
 	id = strings.ToLower(strings.TrimSpace(id))
 
-	size := parseSize(r.URL.Query().Get("s"))
+	size := requestedSize(r)
 
 	switch {
 	case qqRe.MatchString(id):
-		serveAvatar(w, r, fmt.Sprintf("qq:%s:%d", id, size), func(ctx context.Context) ([]byte, string, string, error) {
+		serveAvatar(w, r, fmt.Sprintf("qq:%s:%d", id, size), size, func(ctx context.Context) ([]byte, string, string, error) {
 			return fetchQQ(ctx, id, size)
 		})
 	case emailHashRe.MatchString(id):
-		serveAvatar(w, r, fmt.Sprintf("email:%s:%d", id, size), func(ctx context.Context) ([]byte, string, string, error) {
-			return fetchGravatar(ctx, id, size, defaultMode(r.URL.Query().Get("d")))
+		serveAvatar(w, r, fmt.Sprintf("email:%s:%d", id, size), size, func(ctx context.Context) ([]byte, string, string, error) {
+			return fetchGravatar(ctx, id, size, r.URL.Query().Get("d"))
 		})
 	default:
-		writeDefault(w)
+		writeDefault(w, r, size)
 	}
 }
 
 // serveAvatar 缓存命中且未过期则按 Accept 返回；否则回源、转 AVIF 落盘、再返回。
-func serveAvatar(w http.ResponseWriter, r *http.Request, key string, fetch func(context.Context) ([]byte, string, string, error)) {
+func serveAvatar(w http.ResponseWriter, r *http.Request, key string, size int, fetch func(context.Context) ([]byte, string, string, error)) {
 	avifPath, origPath, ctPath := cachePaths(key)
 
 	// 缓存命中且未过期
@@ -201,7 +221,12 @@ func serveAvatar(w http.ResponseWriter, r *http.Request, key string, fetch func(
 	// 未命中/过期：回源
 	body, ct, src, err := fetch(r.Context())
 	if err != nil || len(body) == 0 {
-		writeDefault(w)
+		writeDefault(w, r, size)
+		return
+	}
+	body, ct, err = normalizeImageSize(body, ct, size)
+	if err != nil || len(body) == 0 {
+		writeDefault(w, r, size)
 		return
 	}
 
@@ -229,7 +254,7 @@ func fetchGravatar(ctx context.Context, hash string, size int, d string) ([]byte
 		url := fmt.Sprintf("%s/avatar/%s?s=%d&d=404", s.base, hash, size)
 		body, ct, err := httpGet(ctx, url)
 		if err == nil && len(body) > 0 {
-			if isKnownPlaceholder(body) {
+			if isKnownPlaceholder(ctx, s, body, size) {
 				continue
 			}
 			return body, ct, s.name, nil // 命中真实头像
@@ -239,9 +264,12 @@ func fetchGravatar(ctx context.Context, hash string, size int, d string) ([]byte
 		}
 	}
 
-	body, ct, err := httpGet(ctx, fmt.Sprintf("%s/avatar/%s?s=%d&d=%s", emailSources[0].base, hash, size, url.QueryEscape(d)))
-	if err == nil && len(body) > 0 {
-		return body, ct, "gravatar-default", nil
+	d = strings.TrimSpace(d)
+	if d != "" && !strings.EqualFold(d, "404") {
+		body, ct, err := httpGet(ctx, fmt.Sprintf("%s/avatar/%s?s=%d&d=%s", emailSources[0].base, hash, size, url.QueryEscape(d)))
+		if err == nil && len(body) > 0 {
+			return body, ct, "gravatar-default", nil
+		}
 	}
 	return nil, "", "", errNoSource
 }
@@ -281,9 +309,9 @@ func httpGet(ctx context.Context, url string) ([]byte, string, error) {
 	return body, ct, nil
 }
 
-// toAVIF 解码原图(jpeg/png/gif/webp)并编码为 AVIF。
+// toAVIF 解码原图(jpeg/png/gif/webp/avif)并编码为 AVIF。
 func toAVIF(data []byte) ([]byte, error) {
-	img, _, err := image.Decode(bytes.NewReader(data))
+	img, _, err := decodeImage(data, "")
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +320,79 @@ func toAVIF(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// normalizeImageSize 保证所有上游都严格返回请求的正方形尺寸。
+// QQ 只提供 40/100/140/640 四档，因此需要在本地缩放；其它源若尺寸正确则保留原始字节。
+func normalizeImageSize(data []byte, contentType string, size int) ([]byte, string, error) {
+	img, format, err := decodeImage(data, contentType)
+	if err != nil {
+		return nil, "", err
+	}
+	b := img.Bounds()
+	if b.Dx() == size && b.Dy() == size {
+		return data, canonicalImageContentType(format, contentType), nil
+	}
+
+	resized := resizeSquare(img, size)
+	var buf bytes.Buffer
+	if format == "jpeg" || format == "jpg" {
+		if err := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: 90}); err != nil {
+			return nil, "", err
+		}
+		return buf.Bytes(), "image/jpeg", nil
+	}
+	if err := png.Encode(&buf, resized); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), "image/png", nil
+}
+
+func canonicalImageContentType(format, fallback string) string {
+	switch strings.ToLower(format) {
+	case "jpeg", "jpg":
+		return "image/jpeg"
+	case "png":
+		return "image/png"
+	case "gif":
+		return "image/gif"
+	case "webp":
+		return "image/webp"
+	case "avif":
+		return "image/avif"
+	default:
+		return fallback
+	}
+}
+
+func decodeImage(data []byte, contentType string) (image.Image, string, error) {
+	if strings.Contains(strings.ToLower(contentType), "image/avif") {
+		img, err := avif.Decode(bytes.NewReader(data))
+		return img, "avif", err
+	}
+	img, format, err := image.Decode(bytes.NewReader(data))
+	if err == nil {
+		return img, format, nil
+	}
+	img, avifErr := avif.Decode(bytes.NewReader(data))
+	if avifErr == nil {
+		return img, "avif", nil
+	}
+	return nil, "", err
+}
+
+func resizeSquare(src image.Image, size int) image.Image {
+	b := src.Bounds()
+	side := b.Dx()
+	if b.Dy() < side {
+		side = b.Dy()
+	}
+	x0 := b.Min.X + (b.Dx()-side)/2
+	y0 := b.Min.Y + (b.Dy()-side)/2
+	srcRect := image.Rect(x0, y0, x0+side, y0+side)
+	dst := image.NewNRGBA(image.Rect(0, 0, size, size))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, srcRect, xdraw.Src, nil)
+	return dst
 }
 
 func acceptsAVIF(r *http.Request) bool {
@@ -303,24 +404,31 @@ func wantsRefresh(r *http.Request) bool {
 	return v == "1" || v == "true" || v == "yes"
 }
 
-func defaultMode(d string) string {
-	d = strings.TrimSpace(d)
-	if d == "" || strings.EqualFold(d, "404") {
-		return "mp"
+// CNAvatar 当前会忽略 d=404，并为不存在的哈希返回自己的占位图。
+// 每个请求尺寸首次使用时拉取同尺寸哨兵图并缓存哈希，避免把占位图误判为真实头像。
+func isKnownPlaceholder(ctx context.Context, s source, body []byte, size int) bool {
+	if s.name != "cnavatar" {
+		return false
 	}
-	return d
-}
-
-func isKnownPlaceholder(body []byte) bool {
-	sum := sha1.Sum(body)
-	return placeholderSHA1[hex.EncodeToString(sum[:])]
+	key := fmt.Sprintf("%s:%d", s.base, size)
+	expected, ok := cnavatarPlaceholderHashes.Load(key)
+	if !ok {
+		probeURL := fmt.Sprintf("%s/avatar/%s?s=%d&d=404", s.base, cnavatarProbeHash, size)
+		probe, _, err := httpGet(ctx, probeURL)
+		if err != nil || len(probe) == 0 {
+			return true // 无法确认不是占位图时，安全地跳过该源。
+		}
+		sum := sha1.Sum(probe)
+		expected, _ = cnavatarPlaceholderHashes.LoadOrStore(key, sum)
+	}
+	return sha1.Sum(body) == expected.([sha1.Size]byte)
 }
 
 // output 输出图片，带缓存头、来源标记、缓存命中标记，并声明 Vary: Accept 供 CDN 分缓存。
 func output(w http.ResponseWriter, body []byte, contentType, source, cache string) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(cacheTTL.Seconds())))
+	w.Header().Set("Cache-Control", sharedCacheControl(cacheTTL))
 	w.Header().Set("Vary", "Accept")
 	w.Header().Set("X-Avatar-Source", source)
 	w.Header().Set("X-Cache", cache)
@@ -328,19 +436,91 @@ func output(w http.ResponseWriter, body []byte, contentType, source, cache strin
 	w.Write(body)
 }
 
-func writeDefault(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Content-Length", strconv.Itoa(len(defaultAvatar)))
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+func writeDefault(w http.ResponseWriter, r *http.Request, size int) {
+	body, contentType, err := renderDefaultAvatar(size, acceptsAVIF(r))
+	if err != nil {
+		body = defaultAvatar
+		contentType = "image/avif"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.Header().Set("Cache-Control", sharedCacheControl(time.Hour))
 	w.Header().Set("Vary", "Accept")
 	w.Header().Set("X-Avatar-Source", "default")
-	w.Write(defaultAvatar)
+	w.Write(body)
+}
+
+// sharedCacheControl keeps the browser copy immediately stale so a new page load
+// reaches ESA and is visible in the request counter. Shared caches may still serve
+// the stored object for ttl, so these revalidations do not become origin traffic.
+func sharedCacheControl(ttl time.Duration) string {
+	return fmt.Sprintf("public, max-age=0, must-revalidate, s-maxage=%d", int(ttl.Seconds()))
+}
+
+func renderDefaultAvatar(size int, wantAVIF bool) ([]byte, string, error) {
+	contentType := "image/png"
+	format := "png"
+	if wantAVIF {
+		contentType = "image/avif"
+		format = "avif"
+	}
+	key := fmt.Sprintf("%d:%s", size, format)
+	if body, ok := defaultCacheGet(key); ok {
+		return body, contentType, nil
+	}
+
+	defaultAvatarOnce.Do(func() {
+		defaultAvatarImage, defaultAvatarErr = avif.Decode(bytes.NewReader(defaultAvatar))
+	})
+	if defaultAvatarErr != nil {
+		return nil, "", defaultAvatarErr
+	}
+	if wantAVIF && defaultAvatarImage.Bounds().Dx() == size && defaultAvatarImage.Bounds().Dy() == size {
+		defaultCachePut(key, defaultAvatar)
+		return defaultAvatar, contentType, nil
+	}
+
+	img := resizeSquare(defaultAvatarImage, size)
+	var buf bytes.Buffer
+	if wantAVIF {
+		if err := avif.Encode(&buf, img, avif.Options{Quality: 90, Speed: 8}); err != nil {
+			return nil, "", err
+		}
+	} else if err := png.Encode(&buf, img); err != nil {
+		return nil, "", err
+	}
+	body := buf.Bytes()
+	defaultCachePut(key, body)
+	return body, contentType, nil
+}
+
+func defaultCacheGet(key string) ([]byte, bool) {
+	defaultRenderCache.Lock()
+	defer defaultRenderCache.Unlock()
+	body, ok := defaultRenderCache.entries[key]
+	return body, ok
+}
+
+func defaultCachePut(key string, body []byte) {
+	defaultRenderCache.Lock()
+	defer defaultRenderCache.Unlock()
+	if _, ok := defaultRenderCache.entries[key]; ok {
+		return
+	}
+	const maxEntries = 32
+	if len(defaultRenderCache.order) >= maxEntries {
+		oldest := defaultRenderCache.order[0]
+		defaultRenderCache.order = defaultRenderCache.order[1:]
+		delete(defaultRenderCache.entries, oldest)
+	}
+	defaultRenderCache.entries[key] = body
+	defaultRenderCache.order = append(defaultRenderCache.order, key)
 }
 
 // ---- 缓存辅助 ----
 
 func cachePaths(key string) (avifPath, origPath, ctPath string) {
-	sum := sha1.Sum([]byte(key))
+	sum := sha1.Sum([]byte(cacheVersion + ":" + key))
 	s := hex.EncodeToString(sum[:])
 	dir := filepath.Join(cacheDir, s[:2])
 	os.MkdirAll(dir, 0o755)
@@ -392,6 +572,14 @@ func pickQQSpec(size int) int {
 	}
 }
 
+func requestedSize(r *http.Request) int {
+	s := r.URL.Query().Get("s")
+	if s == "" {
+		s = r.URL.Query().Get("size")
+	}
+	return parseSize(s)
+}
+
 func parseSize(s string) int {
 	if s == "" {
 		return defaultSize
@@ -406,15 +594,20 @@ func parseSize(s string) int {
 	return n
 }
 
-// statsHandler 返回页脚统计：requests = 本地回源累计 + Bunny CDN 累计服务量 + 百度 CDN 累计服务量。
-// 详细字段 local/bunny/baidu 也一并返回，便于排查；前端只显示 requests。
+// statsHandler 返回页脚统计。ESA 文件是有效头像 CDN 请求的唯一线上口径；
+// local/Bunny/百度只保留用于排查，并仅在 ESA 尚无数据时作为降级值。
 func statsHandler(w http.ResponseWriter, _ *http.Request) {
 	local := atomic.LoadInt64(&requestCount)
 	bunny := readCounterFile(bunnyFile)
 	baidu := readCounterFile(baiduFile)
+	esa := readCounterFile(esaFile)
+	total := esa
+	if total == 0 {
+		total = local + bunny + baidu
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprintf(w, `{"requests":%d,"local":%d,"bunny":%d,"baidu":%d}`, local+bunny+baidu, local, bunny, baidu)
+	fmt.Fprintf(w, `{"requests":%d,"local":%d,"esa":%d,"bunny":%d,"baidu":%d}`, total, local, esa, bunny, baidu)
 }
 
 // readCounterFile 读取后台脚本定时写入的 CDN 累计请求数文件。

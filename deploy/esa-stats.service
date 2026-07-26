@@ -1,0 +1,11 @@
+[Unit]
+Description=LiteAvatar Alibaba Cloud ESA avatar request stats fetcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=caddy
+Group=caddy
+EnvironmentFile=/opt/gravatar-proxy/.env
+ExecStart=/opt/gravatar-proxy/stats/esa-venv/bin/python /opt/gravatar-proxy/stats/esa-stats.py

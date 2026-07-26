@@ -6,7 +6,7 @@
 
 <!-- ===== SEO 核心 ===== -->
 <title>Gravatar 国内加速代理 - 多源头像 API，支持 QQ / Cravatar / WeAvatar | BlueCDN</title>
-<meta name="description" content="免费 Gravatar 国内加速代理服务。并发探测 Gravatar、Cravatar、WeAvatar、腾讯 QQ 四大头像源，自动返回真实头像；支持最大 2048px、无 CORS 跨域限制、全球边缘缓存 15 天，接入只需一行 HTML img 标签，适合 WordPress、论坛、博客等国内站点使用。">
+<meta name="description" content="免费 Gravatar 国内加速代理服务。并发探测 Gravatar、Cravatar、WeAvatar、腾讯 QQ 四大头像源，自动返回真实头像；支持最大 2048px、无 CORS 跨域限制、全球边缘缓存，接入只需一行 HTML img 标签，适合 WordPress、论坛、博客等国内站点使用。">
 <meta name="keywords" content="gravatar国内加速,gravatar代理,gravatar镜像,QQ头像API,头像CDN,cravatar,weavatar,gravatar无法访问解决,gravatar加速,多源头像">
 <meta name="author" content="BlueCDN">
 <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
@@ -33,7 +33,7 @@
     "name": "Gravatar 多源头像代理",
     "alternateName": ["gravatar.bluecdn.com", "BlueCDN Gravatar 加速"],
     "url": "https://gravatar.bluecdn.com/",
-    "description": "免费 Gravatar 国内加速代理，并发探测 Gravatar、Cravatar、WeAvatar、腾讯 QQ 四大头像源，自动返回真实存在的头像图片。支持邮箱 MD5 哈希与 QQ 号两种 ID 格式，最大输出 2048px，全球边缘节点缓存 15 天，所有响应均携带 Access-Control-Allow-Origin: * 无跨域限制。",
+    "description": "免费 Gravatar 国内加速代理，并发探测 Gravatar、Cravatar、WeAvatar、腾讯 QQ 四大头像源，自动返回真实存在的头像图片。支持邮箱 MD5 哈希与 QQ 号两种 ID 格式，最大输出 2048px，全球边缘节点缓存，所有响应均携带 Access-Control-Allow-Origin: * 无跨域限制。",
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "Web",
     "inLanguage": "zh-CN",
@@ -53,7 +53,7 @@
       "并发探测 Gravatar / Cravatar / WeAvatar / QQ 四大头像源",
       "支持邮箱 MD5 哈希与 QQ 号（5-12 位）两种 ID",
       "最大输出 2048×2048px 高清头像",
-      "全球边缘节点缓存 15 天",
+      "全球边缘节点缓存",
       "无 CORS 跨域限制，Access-Control-Allow-Origin: *",
       "HTTPS 加密传输",
       "支持 ?refresh=1 参数强制重新探测"
@@ -100,7 +100,7 @@
         "name": "头像会被缓存多长时间？",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "真实头像缓存 15 天（边缘节点与浏览器均为 15 天，带 immutable 标记）；若所有源均未找到头像，则返回 Gravatar 官方默认占位图并缓存 1 小时。如需立即刷新，在 URL 末尾添加 ?refresh=1 参数可跳过缓存强制重新探测。"
+          "text": "真实头像在 CDN 边缘缓存 7 天；浏览器每次重新加载页面时向 CDN 验证，以便计入头像请求统计。若所有源均未找到头像，则返回 Gravatar 官方默认占位图并在边缘缓存 1 小时。如需立即回源刷新，在 URL 末尾添加 ?refresh=1 参数。"
         }
       },
       {
@@ -140,7 +140,7 @@
         <div class="feature-grid">
             <div class="feature-pill"><i class="fa-solid fa-globe"></i><span>4 个数据源并行</span></div>
             <div class="feature-pill"><i class="fa-solid fa-image"></i><span>最大 2048 px</span></div>
-            <div class="feature-pill"><i class="fa-solid fa-clock-rotate-left"></i><span>缓存 15 天</span></div>
+            <div class="feature-pill"><i class="fa-solid fa-clock-rotate-left"></i><span>边缘缓存 7 天</span></div>
             <div class="feature-pill"><i class="fa-solid fa-shield-halved"></i><span>HTTPS 直连</span></div>
             <div class="feature-pill"><i class="fa-solid fa-arrows-to-circle"></i><span>无 CORS 限制</span></div>
             <div class="feature-pill"><i class="fa-solid fa-rocket"></i><span>边缘 200 ms</span></div>
@@ -284,7 +284,7 @@
             </tr>
             <tr>
                 <td><code>Cache-Control</code></td>
-                <td>真头像 <code>max-age=1296000, immutable</code>（15 天）；占位图 <code>max-age=3600</code>（1 小时）</td>
+                <td>浏览器 <code>max-age=0, must-revalidate</code>；CDN 真头像 <code>s-maxage=604800</code>（7 天），占位图 <code>s-maxage=3600</code>（1 小时）</td>
             </tr>
             <tr>
                 <td><code>Access-Control-Allow-Origin</code></td>
@@ -302,8 +302,8 @@
     <table>
         <thead><tr><th>场景</th><th>边缘缓存</th><th>浏览器缓存</th></tr></thead>
         <tbody>
-            <tr><td><i class="fa-solid fa-circle-check cache-status-icon is-success"></i>命中真实头像</td><td>15 天</td><td>15 天 + immutable</td></tr>
-            <tr><td><i class="fa-solid fa-circle-question cache-status-icon is-warn"></i>所有源都没有 → 占位图</td><td>1 小时</td><td>1 小时</td></tr>
+            <tr><td><i class="fa-solid fa-circle-check cache-status-icon is-success"></i>命中真实头像</td><td>7 天</td><td>每次页面重新加载时验证</td></tr>
+            <tr><td><i class="fa-solid fa-circle-question cache-status-icon is-warn"></i>所有源都没有 → 占位图</td><td>1 小时</td><td>每次页面重新加载时验证</td></tr>
         </tbody>
     </table>
 
@@ -317,7 +317,7 @@
 
     <div class="callout">
         <i class="fa-solid fa-circle-info"></i>
-        <span>缓存命中真头像 15 天、占位图 1 小时。注册后想立刻看到新头像，加 <code>?refresh=1</code> 强制重新探测即可。</span>
+        <span>CDN 边缘缓存真头像 7 天、占位图 1 小时；浏览器重新加载页面会再次向 CDN 请求并计入统计。注册后想立刻回源获取新头像，加 <code>?refresh=1</code> 即可。</span>
     </div>
 </div>
 </section>
@@ -363,7 +363,7 @@
             <h3 class="faq-q" itemprop="name">用户刚上传了新头像，为什么还显示旧头像？</h3>
             <div class="faq-a" itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
                 <div itemprop="text">
-                    <p>边缘缓存有效期为 15 天。若需立即看到新头像，在 URL 末尾加上 <code>?refresh=1</code> 参数可绕过缓存强制重新探测：</p>
+                    <p>边缘缓存有效期为 7 天。若需立即看到新头像，在 URL 末尾加上 <code>?refresh=1</code> 参数可绕过缓存强制重新探测：</p>
                     <div class="code-block"><pre>https://gravatar.bluecdn.com/avatar/{ID}?refresh=1</pre></div>
                 </div>
             </div>
@@ -384,7 +384,7 @@
 
 <footer class="site-footer">
 <div class="container">
-    <p>由 <a href="https://bluecdn.com">BlueCDN</a> 提供 <i class="fa-solid fa-circle footer-dot"></i> 头像数据来自 <a href="https://gravatar.com">Gravatar</a> / <a href="https://cravatar.cn">Cravatar</a> / <a href="https://weavatar.com">WeAvatar</a> / 腾讯 QQ</p>
+    <p>由 <a href="https://bluecdn.com">BlueCDN</a> 提供 <i class="fa-solid fa-circle footer-dot"></i> 头像数据来自 <a href="https://gravatar.com">Gravatar</a> / <a href="https://cravatar.cn">Cravatar</a> / <a href="https://weavatar.com">WeAvatar</a> / <a href="https://cnavatar.com">CNAvatar</a> / 腾讯 QQ</p>
     <p class="footer-stats">
         <i class="fa-solid fa-chart-simple footer-stats-icon"></i>
         已代理头像请求 <strong id="req-count">…</strong> 次
