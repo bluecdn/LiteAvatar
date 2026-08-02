@@ -27,11 +27,12 @@ deploy: linux
 	$(SCP) -r public $(HOST):/tmp/liteavatar-public
 	$(SSH) $(HOST) 'sudo install -o caddy -g caddy -m 0755 /tmp/$(BINARY).new $(REMOTE)/$(BINARY) && sudo install -o caddy -g caddy -m 0644 /tmp/liteavatar-index.html $(REMOTE)/index.html && sudo rm -rf $(REMOTE)/public && sudo install -o caddy -g caddy -d $(REMOTE)/public $(REMOTE)/stats && sudo cp -a /tmp/liteavatar-public/. $(REMOTE)/public/ && sudo chown -R caddy:caddy $(REMOTE)/public && rm -rf /tmp/$(BINARY).new /tmp/liteavatar-index.html /tmp/liteavatar-public && sudo systemctl restart $(BINARY) && sleep 1 && sudo systemctl status --no-pager $(BINARY)'
 
-# 部署/更新 CDN 统计脚本与 systemd timer（不会写入密钥；密钥仍放远端 $(REMOTE)/.env）。
+# 部署/更新 gravatar-proxy 的 systemd 单元。
+# 注:早先这里还部署 bunny-stats / baidu-stats 两套抓取脚本与 timer,
+# CDN 换成阿里云 ESA 后它们已停用并于 2026-08-02 删除,统计改由 deploy-esa-stats 负责。
 deploy-stats:
-	$(SCP) stats/bunny-stats.sh stats/baidu-stats.py $(HOST):/tmp/
-	$(SCP) deploy/gravatar-proxy.service deploy/bunny-stats.service deploy/bunny-stats.timer deploy/baidu-stats.service deploy/baidu-stats.timer $(HOST):/tmp/
-	$(SSH) $(HOST) 'sudo install -o caddy -g caddy -d $(REMOTE)/stats && sudo install -o caddy -g caddy -m 0700 /tmp/bunny-stats.sh $(REMOTE)/stats/bunny-stats.sh && sudo install -o caddy -g caddy -m 0700 /tmp/baidu-stats.py $(REMOTE)/stats/baidu-stats.py && sudo install -o root -g root -m 0644 /tmp/gravatar-proxy.service /etc/systemd/system/gravatar-proxy.service && sudo install -o root -g root -m 0644 /tmp/bunny-stats.service /etc/systemd/system/bunny-stats.service && sudo install -o root -g root -m 0644 /tmp/bunny-stats.timer /etc/systemd/system/bunny-stats.timer && sudo install -o root -g root -m 0644 /tmp/baidu-stats.service /etc/systemd/system/baidu-stats.service && sudo install -o root -g root -m 0644 /tmp/baidu-stats.timer /etc/systemd/system/baidu-stats.timer && sudo systemctl daemon-reload && sudo systemctl enable --now bunny-stats.timer baidu-stats.timer && sudo systemctl restart $(BINARY) && sudo systemctl list-timers --no-pager "*stats.timer"'
+	$(SCP) deploy/gravatar-proxy.service $(HOST):/tmp/
+	$(SSH) $(HOST) 'sudo install -o root -g root -m 0644 /tmp/gravatar-proxy.service /etc/systemd/system/gravatar-proxy.service && sudo systemctl daemon-reload && sudo systemctl restart $(BINARY) && sudo systemctl status --no-pager $(BINARY)'
 
 # 部署 ESA 有效头像请求统计；首次执行会从 ESA 当前可用的原始日志重建正确口径。
 deploy-esa-stats:

@@ -1,69 +1,25 @@
-{
-	email 403010@qq.com
+# gravatar.bluecdn.com — 源站 Caddy 配置(参考)
+#
+# 从芬兰源站 65.109.62.100 的 /etc/caddy/Caddyfile 导出留档。
+# 完整文件还含 bluecdn.com 主站、static、mapcdn、yite.net 等站点,这里只截取 gravatar 部分。
+#
+# 要点:
+#   - 全局 auto_https off,证书由 acme.sh 用 dns_aliesa 插件签发后手工加载(tls_wild 片段)
+#   - 后端 LiteAvatar 监听 127.0.0.1:8787,只走本机回环
+#   - CORS 全开,供 WordPress / 论坛 / 博客跨域引用头像
+#
+# 历史:这里曾放 caddy-sh.Caddyfile / caddy-us.Caddyfile(上海 + 硅谷双源站),
+# 那两台已下线或改作他用,文件于 2026-08-02 删除。
+
+gravatar.bluecdn.com {
+	import tls_wild
+	encode gzip zstd
+	header Access-Control-Allow-Origin "*"
+	reverse_proxy 127.0.0.1:8787
 }
 
-# =============================================================================
-# gravatar.yite.net — 多源头像聚合服务（Go程序，3源failover）
-# 程序: /opt/gravatar-proxy/gravatar-proxy (127.0.0.1:8787)
-# 多源: cn.cravatar.com → secure.gravatar.com → weavatar.com
-# 搬迁自 43.161.202.90 (新加坡)
-# =============================================================================
-
-gravatar.yite.net {
-	tls /etc/caddy/certs/yite.net/fullchain.pem /etc/caddy/certs/yite.net/privkey.pem
-	root * /www/sites/gravatar.bluecdn.com
+http://gravatar.bluecdn.com {
 	encode gzip zstd
-
-	# 安全头
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		Referrer-Policy "strict-origin-when-cross-origin"
-	}
-
-	# CORS
-	header {
-		Access-Control-Allow-Origin "*"
-		Access-Control-Allow-Methods "GET, OPTIONS, HEAD"
-		Access-Control-Allow-Headers "*"
-	}
-	@options method OPTIONS
-	respond @options 204
-
-	# 只允许 /avatar/<hash> 路径走反代程序（防滥用）
-	@avatar path_regexp avatar ^/avatar/([A-Fa-f0-9]{32,64}|\d{5,12})$
-	handle @avatar {
-		reverse_proxy 127.0.0.1:8787 {
-			header_up X-Real-IP {remote_host}
-			header_down -Access-Control-Allow-Origin
-		}
-	}
-
-	# 统计接口（不缓存）
-	handle /stats.php {
-		header Cache-Control "no-store"
-		reverse_proxy 127.0.0.1:8787 {
-			header_down -Access-Control-Allow-Origin
-			header_down -Cache-Control
-		}
-	}
-
-	# 屏蔽残留的 PHP / macOS AppleDouble 文件
-	@legacy_php path_regexp legacy_php \.php(\..*)?$
-	respond @legacy_php 404
-
-	@appledouble path /._* /stats/._*
-	respond @appledouble 404
-
-	@stats_private path /stats/*
-	respond @stats_private 403
-
-	# 首页（静态介绍页）
-	handle / {
-		header Cache-Control "public, max-age=300, must-revalidate"
-		file_server
-	}
-
-	# 其余静态资源（favicon、图标等）
-	file_server
+	header Access-Control-Allow-Origin "*"
+	reverse_proxy 127.0.0.1:8787
 }

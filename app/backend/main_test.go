@@ -189,27 +189,42 @@ func TestSharedCacheControlRevalidatesBrowserAndCachesAtEdge(t *testing.T) {
 
 func TestStatsUsesESAAsAuthoritativeMetric(t *testing.T) {
 	dir := t.TempDir()
-	oldESA, oldBunny, oldBaidu := esaFile, bunnyFile, baiduFile
+	oldESA := esaFile
 	oldLocal := atomic.LoadInt64(&requestCount)
 	t.Cleanup(func() {
-		esaFile, bunnyFile, baiduFile = oldESA, oldBunny, oldBaidu
+		esaFile = oldESA
 		atomic.StoreInt64(&requestCount, oldLocal)
 	})
 
 	esaFile = filepath.Join(dir, "esa.count")
-	bunnyFile = filepath.Join(dir, "bunny.count")
-	baiduFile = filepath.Join(dir, "baidu.count")
 	if err := os.WriteFile(esaFile, []byte("100\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(bunnyFile, []byte("500\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	atomic.StoreInt64(&requestCount, 1000)
 
 	w := httptest.NewRecorder()
 	statsHandler(w, httptest.NewRequest(http.MethodGet, "/stats", nil))
-	if got, want := w.Body.String(), `{"requests":100,"local":1000,"esa":100,"bunny":500,"baidu":0}`; got != want {
+	// ESA 有数据时以它为准，本地计数只作展示，不参与 requests。
+	if got, want := w.Body.String(), `{"requests":100,"local":1000,"esa":100}`; got != want {
+		t.Fatalf("stats body = %s, want %s", got, want)
+	}
+}
+
+func TestStatsFallsBackToLocalWhenESAEmpty(t *testing.T) {
+	dir := t.TempDir()
+	oldESA := esaFile
+	oldLocal := atomic.LoadInt64(&requestCount)
+	t.Cleanup(func() {
+		esaFile = oldESA
+		atomic.StoreInt64(&requestCount, oldLocal)
+	})
+
+	esaFile = filepath.Join(dir, "esa.count") // 文件不存在 → 读作 0
+	atomic.StoreInt64(&requestCount, 42)
+
+	w := httptest.NewRecorder()
+	statsHandler(w, httptest.NewRequest(http.MethodGet, "/stats", nil))
+	if got, want := w.Body.String(), `{"requests":42,"local":42,"esa":0}`; got != want {
 		t.Fatalf("stats body = %s, want %s", got, want)
 	}
 }

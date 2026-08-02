@@ -98,8 +98,6 @@ var (
 	cacheDir     string
 	avifQuality  int
 	cacheTTL     time.Duration // 缓存有效期：命中且未过期直接返回，过期则重新回源
-	bunnyFile    string        // Bunny CDN 累计请求数文件（由后台脚本定时写入）
-	baiduFile    string        // 百度 CDN 累计请求数文件（由后台脚本定时写入）
 	esaFile      string        // 阿里云 ESA 累计请求数文件（由后台脚本定时写入）
 	siteDir      string        // 首页与 public 静态资源目录
 )
@@ -116,8 +114,6 @@ func main() {
 	sd := flag.String("site-dir", ".", "站点根目录(index.html 与 public/)")
 	q := flag.Int("avif-quality", 55, "AVIF 质量 0-100")
 	ttl := flag.Duration("cache-ttl", 7*24*time.Hour, "缓存有效期(过期重新回源),如 168h / 720h")
-	bf := flag.String("bunny-counter", "stats/bunny.count", "Bunny CDN 累计请求数文件(由后台脚本 stats/bunny-stats.sh 定时写入)")
-	bdf := flag.String("baidu-counter", "stats/baidu.count", "百度 CDN 累计请求数文件(由后台脚本 stats/baidu-stats.py 定时写入)")
 	ef := flag.String("esa-counter", "stats/esa.count", "阿里云 ESA 累计请求数文件")
 	flag.Parse()
 	counterFile = *cf
@@ -125,8 +121,6 @@ func main() {
 	siteDir = *sd
 	avifQuality = *q
 	cacheTTL = *ttl
-	bunnyFile = *bf
-	baiduFile = *bdf
 	esaFile = *ef
 
 	emailSources = configuredEmailSources(*upstream)
@@ -595,19 +589,20 @@ func parseSize(s string) int {
 }
 
 // statsHandler 返回页脚统计。ESA 文件是有效头像 CDN 请求的唯一线上口径；
-// local/Bunny/百度只保留用于排查，并仅在 ESA 尚无数据时作为降级值。
+// local 是源站本地计数，仅在 ESA 尚无数据时作为降级值。
+//
+// 早先还有 Bunny / 百度两个来源，CDN 换成阿里云 ESA 后它们的抓取 timer 就已停用，
+// 字段长期恒为 0，于 2026-08-02 一并移除（前端只读 requests，不受影响）。
 func statsHandler(w http.ResponseWriter, _ *http.Request) {
 	local := atomic.LoadInt64(&requestCount)
-	bunny := readCounterFile(bunnyFile)
-	baidu := readCounterFile(baiduFile)
 	esa := readCounterFile(esaFile)
 	total := esa
 	if total == 0 {
-		total = local + bunny + baidu
+		total = local
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprintf(w, `{"requests":%d,"local":%d,"esa":%d,"bunny":%d,"baidu":%d}`, total, local, esa, bunny, baidu)
+	fmt.Fprintf(w, `{"requests":%d,"local":%d,"esa":%d}`, total, local, esa)
 }
 
 // readCounterFile 读取后台脚本定时写入的 CDN 累计请求数文件。
